@@ -2,7 +2,7 @@
   <Map></Map>
 </template>
 <script >
-import Map from "./components/Map.vue";
+import Map from "./components/Mapbox.vue";
 export default {
   setup() {},
   components:{
