@@ -1,6 +1,16 @@
 <template>
     <div id="map"></div>
-    <MapInfo @onSelectedReset="onSelectedReset"></MapInfo>
+    <div class="map-overlay top">
+        <div class="map-overlay-inner">
+            <label>lat : {{ lat }}</label>
+            <label>lng : {{ lng }}</label>
+            <button @click="onSelectedReset()">clear tiles</button>
+            <!-- {{ selectedCellList }} -->
+            <p>zoom level : {{zoom}}</p>
+            <p>tile count : {{ selectedCellList.boxSelect.quadKeys.length !== 0 ? selectedCellList.boxSelect.quadKeys.length : selectedCellList.groupSelect.quadKeys.length }}</p>
+        </div>
+    </div>
+    <pre id="coordinates" class="coordinates"></pre>
 </template>
 
 <script>
@@ -11,20 +21,70 @@ import * as turf from "@turf/turf";
 import SphericalMercator from "../scripts/sphericalmercator";
 import tilebelt from "@mapbox/tilebelt";
 import MapInfo from "./MapInfo.vue";
+import _ from 'lodash'
 
 export default {
     components: {
         MapInfo,
     },
-    
+
     setup() {
-        let xPoint = ref(0);
-        let yPoint = ref(0);
+        let zoom = ref(17)
 
-        let lat = ref(0);
-        let lng = ref(0);
+        let tileStart = false;
 
-    
+        let selectedCellList = ref({
+            boxSelect: {
+                isBoxSelect: false,
+                quadKeys: [],
+                coordinates: [],
+            },
+            groupSelect: {
+                isGroupSelect: false,
+                groupId: -1,
+                quadKeys: [],
+                coordinates: [],
+            },
+        });
+
+        let setSelectedCellList = ref({
+            boxSelect: {
+                isBoxSelect: false,
+                quadKeys: [],
+                coordinates: [],
+            },
+            groupSelect: {
+                isGroupSelect: false,
+                groupId: -1,
+                quadKeys: [],
+                coordinates: [],
+            },
+        });
+
+        let lng = ref(127.146493);
+        let lat = ref(37.529473);
+
+        function getCenterPointXY(u, v) {
+
+            var x = this.narrowWidth * u;
+            var y = this.height * (u * 0.5 + v);
+
+            return { x: x, y: y };
+        };
+
+        function pixelXYToLatLong(pixelX, pixelY, levelOfDetail) {
+            var mapSize = _mapSize(levelOfDetail);
+            var x = (_clip(pixelX, 0, mapSize - 1) / mapSize) - 0.5;
+            var y = 0.5 - (_clip(pixelY, 0, mapSize - 1) / mapSize);
+
+            return {
+                latitude: 90 - 360 * Math.atan(Math.exp(-y * 2 * Math.PI)) / Math.PI,
+                longitude: 360 * x
+            }
+        };
+
+
+
         function calMinMax(start, end) {
             const minX = Math.min(start.tile[0], end.tile[0]);
             const minY = Math.min(start.tile[1], end.tile[1]);
@@ -100,14 +160,16 @@ export default {
                 },
             });
 
-            setSelectedCellList((prevState) => ({
-                ...prevState,
-                groupSelect: {
-                    quadKeys: onGroupSelect.quadKeys,
-                    coordinates: onGroupSelect.coordinates,
-                    isGroupSelect: true,
-                },
-            }));
+            setSelectedCellList((prevState) => (
+
+                {
+                    ...prevState,
+                    groupSelect: {
+                        quadKeys: onGroupSelect.quadKeys,
+                        coordinates: onGroupSelect.coordinates,
+                        isGroupSelect: true,
+                    },
+                }));
 
             onSelect.onGroupSelect = onGroupSelect;
             selectTile.groupClick = true;
@@ -168,36 +230,10 @@ export default {
             groupClick: false,
         };
 
-        const selectedCellList = {
-            boxSelect: {
-                isBoxSelect: false,
-                quadKeys: [],
-                coordinates: [],
-            },
-            groupSelect: {
-                isGroupSelect: false,
-                groupId: -1,
-                quadKeys: [],
-                coordinates: [],
-            },
-        };
 
-        let setSelectedCellList = {
-            boxSelect: {
-                isBoxSelect: false,
-                quadKeys: [],
-                coordinates: [],
-            },
-            groupSelect: {
-                isGroupSelect: false,
-                groupId: -1,
-                quadKeys: [],
-                coordinates: [],
-            },
-        };
+
 
         const onSelectedReset = () => {
-            console.log("?");
             onSelect = {
                 mode: "select",
                 selected: {
@@ -230,16 +266,287 @@ export default {
             selectTile.groupClick = false;
         };
 
-        onMounted(() => {
-            let tileStart = false;
-            let sphericalmercator = new SphericalMercator();
-            //지도 시작 포인트
-            const startPos = [126.9548, 37.55];
+        /**
+         * 맵 로드
+         * 계산식을 이용해서 Tile을 만든다.
+         * issue: 스타일 변경시 재생성 타일 안나옴
+         * */
+        function setTile(map) {
+            console.log('load')
+            tileStart = false;
 
             let onScreenJson = {
                 quadKeys: [],
-                coordinates: [],
+                coordinates: []
             };
+
+            //브라우져 지도의 남서쪽, 북동쪽 좌표
+            const ne = map.getBounds().getNorthEast();
+            const sw = map.getBounds().getSouthWest();
+
+            const tile = tilebelt.pointToTile(ne.lng, ne.lat, 21);
+            const bbox = tilebelt.tileToBBOX(tile);
+
+            const offset = [bbox[2] - bbox[0], bbox[3] - bbox[1]];        // Tile 한변의 길이 구하는 부분
+
+            // Grid 만드는 2중 for문
+            for (let i = sw.lng - offset[0]; i <= ne.lng + offset[0]; i += offset[0]) {     // 0: longitude, 1: latitude
+                for (let j = sw.lat - offset[1]; j <= ne.lat + offset[1]; j += offset[1]) {
+                    const _tile = tilebelt.pointToTile(i, j, 21);
+                    const _geoJson = tilebelt.tileToGeoJSON(_tile).coordinates;
+                    onScreenJson.coordinates.push(_geoJson);
+                    onScreenJson.quadKeys.push(tilebelt.tileToQuadkey(_tile));
+                }
+            }
+
+            const geometryJson = setGeometryJson(onScreenJson.coordinates);
+
+            // 타일 라인 레이어 생성
+            if (map.getSource("tileData") === undefined) {
+
+                map.addSource("tileData", {
+                    type: "geojson",
+                    data: geometryJson
+                });
+
+                map.addLayer({
+                    id: "tile_layer",
+                    type: "line",
+                    source: "tileData",
+                    layout: {
+                        "line-join": "round",
+                        "line-cap": "round"
+                    },
+                    paint: {
+                        "line-color": "#222222",
+                        "line-width": 1,
+                        "line-opacity": 0.3
+                    },
+                    minzoom: 17
+                });
+
+            } else { // map.getSource("tileData") !== undefined
+                map.getSource("tileData").setData(geometryJson);
+            }
+
+            onScreen.quadKeys = onScreenJson.quadKeys;
+            onScreen.coordinates = onScreenJson.coordinates;
+            tileStart = true;
+        } // ========== [setTile] ==========
+
+        /**
+          * 국기 리스트 draw
+          * */
+        function setFlag(map) {
+            // TODO : api에서 지도 가져오기
+            // TODO : 구매된 Tile이 저장하고 있어야 할 데이터 [groupId, grouplist, groupCnt, quadKey, coordinates, center, owner, prevPrice, sellPrice, sell_YN, create_dt, modify_dt]
+            const buyedQuadKeys = callBuyedMap(onScreen.quadKeys);
+
+            let forOnBuyedScreen = []; // 스크린에 있는 구매한 타일 모음(센터추가)
+
+            /** Center 만들기 **/
+            _.map(buyedQuadKeys, (item, i) => {
+                // 동일 index 가져오기
+                const idx = onScreen.quadKeys.findIndex(item2 => item2 === item.quadKey);
+                const tile = tilebelt.quadkeyToTile(item.quadKey);
+                const bbox = tilebelt.tileToBBOX([tile[0] + .5, tile[1] + .5, tile[2]]); // bbox[0],bbox[3]
+
+                // 화면상에 있는 것만 저장
+                if (idx !== -1) forOnBuyedScreen.push({ quadKey: item.quadKey, country: item.country, owner: item.owner, coordinates: onScreen.current.coordinates[idx], center: [bbox[0], bbox[3]], id: item.id });
+            });
+
+            /**
+             * 구매땅에 구매 올리기
+             * desc : Click 에 로직이 있음. 여기서는 데이터만 저장.
+             * */
+            onScreen.onBuyed = forOnBuyedScreen;
+
+            /**
+             * 구매땅에 국기 올리기
+             * desc: 국기별로 center점 저장.
+             * */
+            //국가별로 묶기
+            let groupByCountry = forOnBuyedScreen.reduce((result, current) => {
+                result[current.country] = result[current.country] || [];
+                result[current.country].push(current.center);
+                return result;
+            }, {});
+
+            // 없는 국기 레이어 삭제
+            // desc: 기존 국기 리스트에 없고 동시에 소스는 있을때
+            Object.keys(groupByCountry).forEach(flagName => {
+                if (!onScreen.countryList.includes(flagName) && map.current.getSource("flagData_".concat(flagName)) !== undefined) {
+                    map.current.removeLayer("flag_layer_".concat(flagName));
+                    map.current.removeSource("flagData_".concat(flagName));
+                }
+            });
+
+            onScreen.countryList = [];        // 국기 리스트 초기화
+
+            /** 레이어 올리기, 기존 있는거는 레이어 데이터만 교체,
+             * Warning! : 레이어 삭제후 다시 올리면 twinkling 현상 있음!
+             * */
+            Object.keys(groupByCountry).forEach(flagName => {
+                const featuresData = setGeometryJsonMultiPoint(groupByCountry[flagName]);
+
+                if (map.current.getSource('flagData_'.concat(flagName)) === undefined) {
+                    map.current.addSource('flagData_'.concat(flagName), {
+                        type: 'geojson',
+                        data: featuresData
+                    });
+
+                    map.current.addLayer({
+                        id: 'flag_layer_'.concat(flagName),
+                        type: 'symbol',
+                        source: 'flagData_'.concat(flagName),
+                        minzoom: 17,
+                        layout: {
+                            'icon-image': flagName,
+                            'icon-size': 1.5,
+                            'icon-allow-overlap': true, // zoomLevel 17.18정도일때 합쳐짐 방지
+                        },
+                        paint: {
+                            'icon-opacity': 0.3
+                        }
+                    });
+
+                } else {
+                    // 이미 레이어가 있는 경우는 features 만 교체
+                    map.current.getSource('flagData_'.concat(flagName)).setData(featuresData);
+                }
+                onScreen.countryList.push(flagName);     // 현재 화면상의 국가 리스트
+            });
+        } // setFlag
+
+        /**
+         * 국기 이미지 전부 부르기
+         * desc: 미리 불러야 함.
+         * */
+        /**
+          * 지도 부르는 API
+          * 국가명은 국기파일명과 같게 한다
+          * */
+        const callBuyedMap = async (quadKeys) => {
+            const buyedQuadKeys = [
+                { quadKey: "132110320130303202312", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303203200", country: "kr", owner: "a", id: 228322 },
+                { quadKey: "132110320130303202311", country: "kr", owner: "b", id: 493923 },
+                { quadKey: "132110320130303202313", country: "ad", owner: "c", id: 583922 },
+                { quadKey: "132110320130303202310", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303202130", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303202112", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303202110", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200332", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200330", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200312", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200310", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200132", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200130", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200112", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200110", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303022332", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303022330", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303202132", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303020312", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303020332", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022112", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022132", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303020313", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303020333", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022113", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022133", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022313", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303021220", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023000", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023020", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023200", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022312", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303020330", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022110", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022130", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022310", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303020331", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022111", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022131", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022311", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303021202", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303021222", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023002", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023022", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023202", country: "us", owner: "g", id: 493999 },
+            ];
+            return buyedQuadKeys;
+        }
+
+        /**
+         * 임시 클릭시 데이터
+         * */
+        const callBuyedMapClick = async (id) => {
+            const buyedQuadKeys = [
+                { quadKey: "132110320130303202312", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303203200", country: "kr", owner: "a", id: 228322 },
+                { quadKey: "132110320130303202311", country: "kr", owner: "b", id: 493923 },
+                { quadKey: "132110320130303202313", country: "ad", owner: "c", id: 583922 },
+                { quadKey: "132110320130303202310", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303202130", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303202112", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303202110", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200332", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200330", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200312", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200310", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200132", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200130", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200112", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303200110", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303022332", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303022330", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303202132", country: "kr", owner: "a", id: 282313 },
+                { quadKey: "132110320130303020312", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303020332", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022112", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022132", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303020313", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303020333", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022113", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022133", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022313", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303021220", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023000", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023020", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023200", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022312", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303020330", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022110", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022130", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022310", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303020331", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022111", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022131", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303022311", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303021202", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303021222", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023002", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023022", country: "us", owner: "g", id: 493999 },
+                { quadKey: "132110320130303023202", country: "us", owner: "g", id: 493999 },
+            ];
+
+            _.map(buyedQuadKeys, (item, i) => {
+                // 동일 index 가져오기
+                const tile = tilebelt.quadkeyToTile(item.quadKey);
+                const coordinates = tilebelt.tileToGeoJSON(tile).coordinates;
+                const bbox = tilebelt.tileToBBOX([tile[0] + .5, tile[1] + .5, tile[2]]) // bbox[0],bbox[3]
+                item.center = [bbox[0], bbox[3]];
+                item.coordinates = coordinates;
+            });
+
+            return buyedQuadKeys.filter(item => item.id === id);
+        }
+        onMounted(() => {
+
+            //지도 시작 포인트
+            const startPos = [lng.value, lat.value];
+
             mapboxgl.accessToken =
                 "pk.eyJ1IjoiaGpsZWVlOTMiLCJhIjoiY2t6Nno1Zm1zMHc2eDJ5cHI4cmp6NWk1OCJ9.Ai1Gmiu--ecVJ6DEf73nMQ";
 
@@ -247,49 +554,33 @@ export default {
                 container: "map", // container ID
                 style: "mapbox://styles/mapbox/streets-v11", // style URL
                 center: startPos, // starting position [lng, lat]
-                zoom: 18, // starting zoom
+                zoom: zoom.value, // starting zoom
             });
 
-            const bounds = map.getBounds();
-            const ne = bounds.getNorthEast();
-            const sw = bounds.getSouthWest();
+            const marker = new mapboxgl.Marker({
+                draggable: true
+            })
+                .setLngLat([lng.value, lat.value])
+                .addTo(map);
 
-            const xyz = sphericalmercator.xyz(startPos, 21);
-
-            const box = sphericalmercator.bbox(xyz.minX, xyz.maxY, 21);
-
-            const offset = [box[2] - box[0], box[3] - box[1]];
-
-            for (
-                let i = sw.lng - offset[0];
-                i <= ne.lng + offset[0];
-                i += offset[0]
-            ) {
-                // 0: longitude, 1: latitude
-                for (
-                    let j = sw.lat - offset[1];
-                    j <= ne.lat + offset[1];
-                    j += offset[1]
-                ) {
-                    const _tile = tilebelt.pointToTile(i, j, 21);
-                    const _geoJson = tilebelt.tileToGeoJSON(_tile).coordinates;
-                    onScreenJson.coordinates.push(_geoJson);
-                    onScreenJson.quadKeys.push(tilebelt.tileToQuadkey(_tile));
-                }
+            function onDragEnd() {
+                const lngLat = marker.getLngLat();
+                coordinates.style.display = 'block';
+                coordinates.innerHTML = `Longitude: ${lngLat.lng}<br />Latitude: ${lngLat.lat}`;
             }
-            const geometryJson = setGeometryJson(onScreenJson.coordinates);
+
+            marker.on('dragend', onDragEnd);
 
             map.on("click", async (event) => {
                 const _self = {};
                 // if (map.getZoom() < 17) return; // 줌 레벨 17이하 이벤트막기
-                console.log(event);
 
                 const latLng = event.lngLat;
-                const lng = latLng.lng,
-                    lat = latLng.lat;
+                lng.value = latLng.lng;
+                lat.value = latLng.lat;
 
                 //selected tile
-                const tile = tilebelt.pointToTile(lng, lat, 21);
+                const tile = tilebelt.pointToTile(lng.value, lat.value, 21);
 
                 //quadkey : 지도 index key
                 const quadKey = tilebelt.tileToQuadkey(tile);
@@ -311,7 +602,7 @@ export default {
                     }
 
                     // TODO : 나중에 조회 api로 변경 == START
-                    let clickAreaJson = await callBuyedMapClick(
+                    let clickAreaJson = callBuyedMapClick(
                         onScreen.onBuyed[findIndex].id
                     );
                     // TODO : 나중에 조회 api로 변경 == END
@@ -331,7 +622,7 @@ export default {
                         onGroupSelect.country = item.country;
                     });
 
-                    await setClickTileGroupStart(onGroupSelect);
+                    setClickTileGroupStart(onGroupSelect);
                 };
 
                 /**
@@ -340,8 +631,6 @@ export default {
                  * */
                 setClickTileSelectBoxStart = (quadKey, coordinate, tile) => {
                     const geometryJson = setGeometryJson([coordinate]);
-                    console.log("geometryJson", geometryJson);
-                    console.log("onSelect", onSelect);
                     onSelect.onSelect.start = { tile: tile }; // 최초 클릭시 타일 저장
 
                     // 선택모드 => 클릭시 => 새로운 레이어생성
@@ -361,7 +650,7 @@ export default {
                                 "fill-color": "#000",
                                 "fill-opacity": 0.5,
                             },
-                            minzoom: 18,
+                            minzoom: zoom.value,
                         });
                         onSelect.selected.quadKeys.push(quadKey); // id값
                         onSelect.selected.coordinates.push(coordinate); // geojson
@@ -374,7 +663,7 @@ export default {
                          * map.getSource("selectData") !== undefined
                          * */
                         // 100개 넘어가면 true
-                        const isMax = onSelect.selected.quadKeys.length >= 100;
+                        const isMax = onSelect.selected.quadKeys.length >= 500;
                         // 기존 맵에 없는지 체크
                         const isExist =
                             onSelect.selected.quadKeys.findIndex(
@@ -424,7 +713,7 @@ export default {
                             isBoxSelect: true,
                         },
                     };
-
+                    selectedCellList.value = setSelectedCellList
                     // 초기화
                     onSelect.onSelect.quadKeys = [];
                     onSelect.onSelect.coordinates = [];
@@ -525,7 +814,7 @@ export default {
                 /**
                  * [클릭동작]
                  * */
-                async function setClickTile(quadKey, coordinate, tile) {
+                function setClickTile(quadKey, coordinate, tile) {
                     console.log("onSelect", onSelect);
                     switch (onSelect.mode) {
                         case "select" /** =================[선택모드]================= **/:
@@ -571,7 +860,6 @@ export default {
                                     },
                                 };
 
-                                console.log("coordinate222", coordinate);
                                 setClickTileSelectBoxStart(
                                     quadKey,
                                     coordinate,
@@ -598,9 +886,18 @@ export default {
                     selectTile.tileClick = !selectTile.tileClick; // 클릭 or 클릭아님 모드 변경
                 }
 
+
                 // 로직 시작
-                await setClickTile(quadKey, coordinate, tile);
+                setClickTile(quadKey, coordinate, tile);
             });
+
+
+            //줌이 끝났을때 동작
+            map.on('zoomend', function () {
+                zoom.value = map.getZoom()
+               
+                console.log('zoomLevel', zoom.value);
+            })
 
             /**
              * [마우스오버 이벤트]
@@ -662,7 +959,7 @@ export default {
                                 onSelectTemp.quadKeys.length;
 
                             // 100개 넘어가면 선택불가
-                            const isMax = _mergeQuadKeys >= 100;
+                            const isMax = _mergeQuadKeys >= 500;
                             // 기존 맵에 있는지 체크
                             const isExist =
                                 onSelect.selected.quadKeys.findIndex(
@@ -755,9 +1052,9 @@ export default {
                 };
 
                 const latLng = event.lngLat;
-                const lng = latLng.lng,
-                    lat = latLng.lat;
-                const _tile = tilebelt.pointToTile(lng, lat, 21); // xyz return
+                lng.value = latLng.lng;
+                lat.value = latLng.lat;
+                const _tile = tilebelt.pointToTile(lng.value, lat.value, 21); // xyz return
 
                 switch (onSelect.mode) {
                     case "select":
@@ -890,48 +1187,36 @@ export default {
 
             map.on("load", async () => {
                 console.log('load map')
-                // 타일 라인 레이어 생성
-                if (map.getSource("tileData") === undefined) {
-                    map.addSource("tileData", {
-                        type: "geojson",
-                        data: geometryJson,
-                    });
+                /**
+                 * [지도 움직임 이벤트]
+                 * desc: zoomLevel 17 이하에서만 동작 가능
+                 * */
+                map.on('moveend', (event) => {
+                    let sendAction = true;
+                    if (event && event.originalEvent && event.originalEvent.type === 'resize') sendAction = false;
+                    if (!sendAction) return;
+                    if (map.getZoom() < 17) return;
+                    console.log('load')
+                    setTile(map);         // 타일
+                    setFlag(map);        // 국기
 
-                    map.addLayer({
-                        id: "tile_layer",
-                        type: "line",
-                        source: "tileData",
-                        layout: {
-                            "line-join": "round",
-                            "line-cap": "round",
-                        },
-                        paint: {
-                            "line-color": "#222222",
-                            "line-width": 1,
-                            "line-opacity": 0.3,
-                        },
-                        minzoom: 17,
-                    });
-                } else {
-                    // map.getSource("tileData") !== undefined
-                    map.getSource("tileData").setData(geometryJson);
-                }
+                }); // ======[moveend]======
+                setTile(map);
 
-                onScreen.quadKeys = onScreenJson.quadKeys;
-                onScreen.coordinates = onScreenJson.coordinates;
-                tileStart = true;
+
                 if (onSelect.onGroupSelect.quadKeys.length !== 0)
                     await setClickTileGroupStart(onSelect.onGroupSelect);
                 if (onSelect.selected.quadKeys.length !== 0)
                     await setClickTileSelectBoxStart();
             });
+
         });
         return {
-            xPoint,
-            yPoint,
             lat,
             lng,
             onSelectedReset,
+            selectedCellList,
+            zoom
         };
     },
 };
@@ -948,6 +1233,19 @@ body {
     top: 0;
     bottom: 0;
     width: 100%;
+}
+.coordinates {
+    background: rgba(0, 0, 0, 0.5);
+    color: #fff;
+    position: absolute;
+    bottom: 40px;
+    left: 10px;
+    padding: 5px 10px;
+    margin: 0;
+    font-size: 11px;
+    line-height: 18px;
+    border-radius: 3px;
+    display: none;
 }
 .boxdraw {
     background: rgba(56, 135, 190, 0.1);
